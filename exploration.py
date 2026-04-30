@@ -40,7 +40,12 @@ class RNDNetwork(IntrinsicRewardModule):
         # Make sure to not backpropagate gradients through the target network, i.e.
         #   keep the target network static.
         # Compute MSE loss, i.e. through F.mse_loss(...)
-        return NotImplemented
+        with torch.no_grad():
+            target_out = self.target(next_obs)
+
+        pred_out = self.predictor(next_obs)
+
+        return F.mse_loss(pred_out, target_out)
 
     def calculate_reward(self, obs, next_obs, actions):
         # TODO
@@ -48,8 +53,17 @@ class RNDNetwork(IntrinsicRewardModule):
         #   target and predictor outputs.
         # Scale them using self.alpha
         # Force them into the interval [0.0, 1.0]
-        return torch.Tensor([0.0])
+        with torch.no_grad():
+            target_out = self.target(next_obs)
+            pred_out = self.predictor(next_obs)
 
+        diff = torch.abs(target_out - pred_out).sum(dim=1)
+        diff_min = diff.min()
+        diff_max = diff.max()
+
+        normalized = (diff - diff_min) / (diff_max - diff_min + 1e-8)
+
+        return self.alpha * normalized
 
 class ICMNetwork(IntrinsicRewardModule):
     """Implementation of Intrinsic Curiosity Module (ICM)"""
@@ -85,7 +99,12 @@ class ICMNetwork(IntrinsicRewardModule):
         # - Use both of the encodings to predict the action that has been performed
         #       Hint: Have a look at how the input layer sizes are defined
         # - Calculate the cross entropy loss between prediction and ground-truth
-        inverse_dynamics_loss = 0.0
+        phi_obs = self.feature(obs)
+        next_phi_obs = self.feature(next_obs)
+
+        inverse_input = torch.cat([phi_obs, next_phi_obs], dim=1)
+        inverse_pred = self.inverse_dynamics(inverse_input)
+        inverse_dynamics_loss = F.cross_entropy(inverse_pred, actions_target.argmax(dim=1))
 
         # TODO
         # Forward dynamics loss
@@ -93,7 +112,9 @@ class ICMNetwork(IntrinsicRewardModule):
         #       to the forward_dynamics model
         # - Calculate, how much the forward prediction differs from the actual next_obs encoding
         # - Calculate the MSE loss between prediction and ground-truth, multiply by 0.5
-        forward_dynamics_loss = 0.0
+        forward_input = torch.cat([phi_obs, actions_target], dim=1)
+        forward_pred = self.forward_dynamics(forward_input)
+        forward_dynamics_loss = 0.5 * F.mse_loss(forward_pred, next_phi_obs.detach())
 
         # Add up
         loss = (
@@ -111,6 +132,14 @@ class ICMNetwork(IntrinsicRewardModule):
         # - The reward is defined as the MAE between ground truth and prediction of the forward model
         # - Use L1 loss (MAE) instead of MSE to compute the differences between the two
         # - Multiply by the scaling factor alpha
-        reward = 0.0
+        with torch.no_grad():
+            phi_obs = self.feature(obs)
+            next_phi_obs = self.feature(next_obs)
+            forward_input = torch.cat([phi_obs, actions_one_hot], dim=1)
+            forward_pred = self.forward_dynamics(forward_input)
+        reward = self.alpha * torch.mean(
+            torch.abs(next_phi_obs - forward_pred), dim=1
+        )
+
         
         return reward
